@@ -1,4 +1,5 @@
 # Introduction  
+## Special Thx to ShotokuTech on YouTube: https://www.youtube.com/watch?v=shJxD5fiEhs
 
 ## Overview  
 
