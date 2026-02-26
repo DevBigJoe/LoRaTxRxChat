@@ -28,3 +28,16 @@ https://github.com/Heltec-Aaron-Lee/WiFi_Kit_series/releases/download/0.0.7/pack
    **WiFi LoRa 32 (V3) / Wireless Shell (V3) / Wireless Stick Lite (V3)**
 
 > **Note:** Your ESP board must be plugged into your PC.
+
+## Features
+
+- **Multi-hop messaging**: Messages can traverse multiple ESP nodes using a TTL mechanism.
+- **Device ID**: Each node is identified by a user-assigned name.
+- **Message forwarding**: Devices forward messages not addressed to them.
+- **TTL**: Messages die after a defined number of hops (`MAX_TTL`, e.g. 15).
+- **Display**: OLED shows `From`, `To`, and message content with automatic line wrapping.
+- **Long messages**: Supports up to 512 characters per message.
+
+## Usage
+1. Set Device ID, enter a short name for this node (e.g. Alex, NodeMain,...)
+2. Send a Message, just type your message in the serial Monitor (e.g.Computer, Laptop, ArduinoIDE, Smartphone app like "Serial USB Terminal (PlayStore)") followed by ***<ReceiverName>. Press Enter

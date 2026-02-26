@@ -1,222 +1,232 @@
-#include <Wire.h>  
-#include "HT_SSD1306Wire.h"
+//--------------------------------------------- Includes -------------------------------------------
+#include "LoRaWan_APP.h"
+#include "Arduino.h"
+#include <Wire.h> // Display
+#include "HT_SSD1306Wire.h" // Display
 
-#ifdef Wireless_Stick_V3
-SSD1306Wire  display(0x3c, 500000, SDA_OLED, SCL_OLED, GEOMETRY_64_32, RST_OLED); // addr , freq , i2c group , resolution , rst
-#else
-SSD1306Wire  display(0x3c, 500000, SDA_OLED, SCL_OLED, GEOMETRY_128_64, RST_OLED); // addr , freq , i2c group , resolution , rst
-#endif
+//--------------------------------------------- LoRa Settings --------------------------------------
+#define RF_FREQUENCY           868000000
+#define TX_OUTPUT_POWER        14
+#define LORA_BANDWIDTH         0
+#define LORA_SPREADING_FACTOR  7
+#define LORA_CODINGRATE        1
+#define LORA_PREAMBLE_LENGTH   8
+#define LORA_SYMBOL_TIMEOUT    0
+#define LORA_FIX_LENGTH_PAYLOAD_ON false
+#define LORA_IQ_INVERSION_ON   false
 
-void drawLines() {
-  for (int16_t i=0; i<display.getWidth(); i+=4) {
-    display.drawLine(0, 0, i, display.getHeight()-1);
-    display.display();
-    delay(10);
-  }
-  for (int16_t i=0; i<display.getHeight(); i+=4) {
-    display.drawLine(0, 0, display.getWidth()-1, i);
-    display.display();
-    delay(10);
-  }
-  delay(250);
+#define BUFFER_SIZE 512  // Large enough for long messages
+#define MAX_TTL 15       // Maximum number of hops
 
-  display.clear();
-  for (int16_t i=0; i<display.getWidth(); i+=4) {
-    display.drawLine(0, display.getHeight()-1, i, 0);
-    display.display();
-    delay(10);
-  }
-  for (int16_t i=display.getHeight()-1; i>=0; i-=4) {
-    display.drawLine(0, display.getHeight()-1, display.getWidth()-1, i);
-    display.display();
-    delay(10);
-  }
-  delay(250);
+//--------------------------------------------- Objects --------------------------------------------
+static RadioEvents_t RadioEvents;
+SSD1306Wire myDisplay(0x3c, 500000, SDA_OLED, SCL_OLED, GEOMETRY_128_64, RST_OLED);
 
-  display.clear();
-  for (int16_t i=display.getWidth()-1; i>=0; i-=4) {
-    display.drawLine(display.getWidth()-1, display.getHeight()-1, i, 0);
-    display.display();
-    delay(10);
-  }
-  for (int16_t i=display.getHeight()-1; i>=0; i-=4) {
-    display.drawLine(display.getWidth()-1, display.getHeight()-1, 0, i);
-    display.display();
-    delay(10);
-  }
-  delay(250);
-  display.clear();
-  for (int16_t i=0; i<display.getHeight(); i+=4) {
-    display.drawLine(display.getWidth()-1, 0, 0, i);
-    display.display();
-    delay(10);
-  }
-  for (int16_t i=0; i<display.getWidth(); i+=4) {
-    display.drawLine(display.getWidth()-1, 0, i, display.getHeight()-1);
-    display.display();
-    delay(10);
-  }
-  delay(250);
+//--------------------------------------------- Buffers --------------------------------------------
+char txpacket[BUFFER_SIZE];
+char rxpacket[BUFFER_SIZE];
+String EingabeTastatur;
+char deviceID[32];
+
+//--------------------------------------------- Prototypes -----------------------------------------
+void OnTxDone(void);
+void OnRxDone(uint8_t *payload, uint16_t size, int16_t rssi, int8_t snr);
+void startReceive();
+void sendMessage(const char* message);
+void showMessage(const char* sender, const char* receiver, const char* message);
+
+//--------------------------------------------- Display --------------------------------------------
+void showMessage(const char* sender, const char* receiver, const char* message) {
+    myDisplay.clear();
+    myDisplay.setTextAlignment(TEXT_ALIGN_LEFT);
+    myDisplay.setFont(ArialMT_Plain_10);
+
+    // Display layout
+    const int lineHeight = 12; // Each line height in pixels
+    const int maxLines = 6;    // 64px display / 12px per line
+
+    // First line: From and To
+    String header = String("From: ") + sender + " To: " + receiver;
+    myDisplay.drawString(0, 0, header);
+
+    // Wrap message to remaining lines
+    int y = lineHeight;
+    int maxLineWidth = 128;
+
+    String msg = String(message);
+    int startIdx = 0;
+
+    while (startIdx < msg.length() && y < lineHeight * maxLines) {
+        int len = 0;
+
+        // Find max substring that fits in line
+        while (len + startIdx < msg.length() &&
+               myDisplay.getStringWidth(msg.substring(startIdx, startIdx + len + 1)) < maxLineWidth) {
+            len++;
+        }
+
+        if (len == 0) len = 1; // Force at least one char per line
+
+        myDisplay.drawString(0, y, msg.substring(startIdx, startIdx + len));
+        startIdx += len;
+        y += lineHeight;
+    }
+
+    myDisplay.display();
 }
 
-// Adapted from Adafruit_SSD1306
-void drawRect(void) {
-  for (int16_t i=0; i<display.getHeight()/2; i+=2) {
-    display.drawRect(i, i, display.getWidth()-2*i, display.getHeight()-2*i);
-    display.display();
-    delay(10);
-  }
+//--------------------------------------------- Send -----------------------------------------------
+void sendMessage(const char* message) {
+  strncpy(txpacket, message, BUFFER_SIZE - 1);
+  txpacket[BUFFER_SIZE - 1] = '\0';
+  Radio.Send((uint8_t*)txpacket, strlen(txpacket));
 }
 
-// Adapted from Adafruit_SSD1306
-void fillRect(void) {
-  uint8_t color = 1;
-  for (int16_t i=0; i<display.getHeight()/2; i+=3) {
-    display.setColor((color % 2 == 0) ? BLACK : WHITE); // alternate colors
-    display.fillRect(i, i, display.getWidth() - i*2, display.getHeight() - i*2);
-    display.display();
-    delay(10);
-    color++;
-  }
-  // Reset back to WHITE
-  display.setColor(WHITE);
+//--------------------------------------------- Receive --------------------------------------------
+void startReceive() {
+  Radio.Rx(0);
 }
 
-// Adapted from Adafruit_SSD1306
-void drawCircle(void) {
-  for (int16_t i=0; i<display.getHeight(); i+=2) {
-    display.drawCircle(display.getWidth()/2, display.getHeight()/2, i);
-    display.display();
-    delay(10);
-  }
-  delay(1000);
-  display.clear();
-
-  // This will draw the part of the circel in quadrant 1
-  // Quadrants are numberd like this:
-  //   0010 | 0001
-  //  ------|-----
-  //   0100 | 1000
-  //
-  display.drawCircleQuads(display.getWidth()/2, display.getHeight()/2, display.getHeight()/4, 0b00000001);
-  display.display();
-  delay(200);
-  display.drawCircleQuads(display.getWidth()/2, display.getHeight()/2, display.getHeight()/4, 0b00000011);
-  display.display();
-  delay(200);
-  display.drawCircleQuads(display.getWidth()/2, display.getHeight()/2, display.getHeight()/4, 0b00000111);
-  display.display();
-  delay(200);
-  display.drawCircleQuads(display.getWidth()/2, display.getHeight()/2, display.getHeight()/4, 0b00001111);
-  display.display();
-}
-
-void printBuffer(void) {
-  // Initialize the log buffer
-  // allocate memory to store 8 lines of text and 30 chars per line.
-  display.setLogBuffer(2, 30);
-
-  // Some test data
-  const char* test[] = {
-      "Hello",
-      "World" ,
-      "----",
-      "Show off",
-      "how",
-      "the log buffer",
-      "is",
-      "working.",
-      "Even",
-      "scrolling is",
-      "working"
-  };
-
-  for (uint8_t i = 0; i < 11; i++) {
-    display.clear();
-    // Print to the screen
-    display.println(test[i]);
-    // Draw it to the internal screen buffer
-    display.drawLogBuffer(0, 0);
-    // Display it on the screen
-    display.display();
-    delay(500);
-  }
-}
-
-void VextON(void)
-{
-  pinMode(Vext,OUTPUT);
-  digitalWrite(Vext, LOW);
-}
-
-void VextOFF(void) //Vext default OFF
-{
-  pinMode(Vext,OUTPUT);
-  digitalWrite(Vext, HIGH);
-}
-
+//--------------------------------------------- Setup ----------------------------------------------
 void setup() {
-  VextON();
-  delay(100);
-
-  display.init();
-  display.clear();
-  display.display();
-  
-  display.setContrast(255);
-
-  drawLines();
-  delay(1000);
-  display.clear();
-
-  drawRect();
-  delay(1000);
-  display.clear();
-
-  fillRect();
-  delay(1000);
-  display.clear();
-
-  drawCircle();
-  delay(1000);
-  display.clear();
-  
-  printBuffer();
+  Serial.begin(115200);
   delay(1000);
 
-  display.setTextAlignment(TEXT_ALIGN_CENTER);
-  display.clear();
-  display.display();
-  display.screenRotate(ANGLE_0_DEGREE);
-  display.setFont(ArialMT_Plain_16);
-  display.drawString(display.getWidth()/2, display.getHeight()/2-16/2, "ROTATE_0");
-  display.display();
-  delay(2000);
+  myDisplay.init();
+  myDisplay.setFont(ArialMT_Plain_10);
 
-  display.clear();
-  display.display();
-  display.screenRotate(ANGLE_90_DEGREE);
-  display.setFont(ArialMT_Plain_10);
-  display.drawString(display.getWidth()/2, display.getHeight()/2-10/2, "ROTATE_90");
-  display.display();
-  delay(2000);
+  Mcu.begin();
 
-  display.clear();
-  display.display();
-  display.screenRotate(ANGLE_180_DEGREE);
-  display.setFont(ArialMT_Plain_16);
-  display.drawString(display.getWidth()/2, display.getHeight()/2-16/2, "ROTATE_180");
-  display.display();
-  delay(2000);
+  // Force user to enter ID on every boot
+  Serial.println("Enter your ID:");
+  while (Serial.available() == 0) { delay(10); }
+  size_t len = Serial.readBytesUntil('\n', deviceID, 31);
+  deviceID[len] = '\0';
 
-  display.clear();
-  display.display();
-  display.screenRotate(ANGLE_270_DEGREE);
-  display.setFont(ArialMT_Plain_10);
-  display.drawString(display.getWidth()/2, display.getHeight()/2-10/2, "ROTATE_270");
-  display.display();
-  delay(2000);
+  Serial.print("Your ID is: ");
+  Serial.println(deviceID);
 
+  // Register LoRa callbacks
+  RadioEvents.TxDone = OnTxDone;
+  RadioEvents.RxDone = OnRxDone;
+
+  Radio.Init(&RadioEvents);
+  Radio.SetChannel(RF_FREQUENCY);
+
+  Radio.SetTxConfig(MODEM_LORA,
+                    TX_OUTPUT_POWER,
+                    0,
+                    LORA_BANDWIDTH,
+                    LORA_SPREADING_FACTOR,
+                    LORA_CODINGRATE,
+                    LORA_PREAMBLE_LENGTH,
+                    LORA_FIX_LENGTH_PAYLOAD_ON,
+                    true,
+                    0,
+                    0,
+                    LORA_IQ_INVERSION_ON,
+                    3000);
+
+  Radio.SetRxConfig(MODEM_LORA,
+                    LORA_BANDWIDTH,
+                    LORA_SPREADING_FACTOR,
+                    LORA_CODINGRATE,
+                    0,
+                    LORA_PREAMBLE_LENGTH,
+                    LORA_SYMBOL_TIMEOUT,
+                    LORA_FIX_LENGTH_PAYLOAD_ON,
+                    0,
+                    true,
+                    0,
+                    0,
+                    LORA_IQ_INVERSION_ON,
+                    true);
+
+  startReceive();
 }
 
-void loop() { }
+//--------------------------------------------- TX Callback ----------------------------------------
+void OnTxDone(void) {
+  Serial.println("TX done");
+  startReceive();
+}
+
+//--------------------------------------------- RX Callback ----------------------------------------
+void OnRxDone(uint8_t *payload, uint16_t size, int16_t rssi, int8_t snr) {
+  if (size >= BUFFER_SIZE) size = BUFFER_SIZE - 1;
+  memcpy(rxpacket, payload, size);
+  rxpacket[size] = '\0';
+
+  Serial.print("Full RX: ");
+  Serial.println(rxpacket);
+
+  char sender[32];
+  char receiver[32];
+  int ttl;
+
+  // Parse the first and second pipe symbols
+  char* firstPipe = strchr(rxpacket, '|');
+  char* secondPipe = firstPipe ? strchr(firstPipe + 1, '|') : nullptr;
+
+  if (!firstPipe || !secondPipe) { startReceive(); return; }
+
+  // Extract sender (up to " to ")
+  char* toPos = strstr(rxpacket, " to ");
+  if (!toPos || toPos >= firstPipe) { startReceive(); return; }
+  size_t senderLen = toPos - rxpacket;
+  strncpy(sender, rxpacket, senderLen);
+  sender[senderLen] = '\0';
+
+  // Extract receiver (between "to " and first "|")
+  size_t receiverLen = firstPipe - (toPos + 4);
+  strncpy(receiver, toPos + 4, receiverLen);
+  receiver[receiverLen] = '\0';
+
+  // Extract TTL
+  ttl = atoi(firstPipe + 1);
+  if (ttl <= 0) { startReceive(); return; }
+  ttl--;
+
+  // Extract message (after second "|")
+  char message[BUFFER_SIZE];
+  strncpy(message, secondPipe + 1, BUFFER_SIZE - 1);
+  message[BUFFER_SIZE - 1] = '\0';
+
+  // Display sender, receiver, and message
+  showMessage(sender, receiver, message);
+
+  // Forward if not intended for this device
+  if (strcmp(receiver, deviceID) != 0) {
+    char forwardPacket[BUFFER_SIZE];
+    snprintf(forwardPacket, BUFFER_SIZE,
+             "%s to %s | %d | %s",
+             sender, receiver, ttl, message);
+    sendMessage(forwardPacket);
+  }
+
+  startReceive();
+}
+
+//--------------------------------------------- Main Loop ------------------------------------------
+void loop() {
+  if (Serial.available() > 0) {
+    EingabeTastatur = Serial.readStringUntil('\n');
+
+    int sepIndex = EingabeTastatur.indexOf("***");
+    if (sepIndex == -1) {
+      Serial.println("Invalid format. Use: message ***Receiver");
+      return;
+    }
+
+    String message = EingabeTastatur.substring(0, sepIndex);
+    String receiver = EingabeTastatur.substring(sepIndex + 3);
+
+    String packet = String(deviceID) + " to " + receiver + " | " + MAX_TTL + " | " + message;
+    sendMessage(packet.c_str());
+
+    Serial.print("Sent: ");
+    Serial.println(packet);
+  }
+
+  Radio.IrqProcess();
+}
