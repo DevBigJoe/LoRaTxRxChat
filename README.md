@@ -42,5 +42,5 @@ https://github.com/Heltec-Aaron-Lee/WiFi_Kit_series/releases/download/0.0.7/pack
 
 ## Usage
 1. Set Device ID, enter a short name for this node (e.g. Alex, NodeMain,...)
-2. Send a Message, just type your message in the serial Monitor (e.g.Computer, Laptop, ArduinoIDE, Smartphone app like "Serial USB Terminal (PlayStore)") followed by ***<ReceiverName>. Press Enter
+2. Send a Message, just type your message in the serial Monitor (e.g.Computer, Laptop, ArduinoIDE, Smartphone app like "Serial USB Terminal (PlayStore)") followed by ***ReceiverName. Press Enter
 
